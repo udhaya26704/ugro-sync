@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ta">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>உழவர் இணைப்பு – Farm Connect</title>
+<!--
+SETUP (Firebase console, free Spark plan):
+1. Create project > Add web app > copy config into CFG below.
+2. Build > Authentication > Sign-in method > enable Phone. (Add test numbers while developing; real SMS needs Blaze plan.)
+3. Build > Firestore Database > create (production mode) > Rules > paste:
+   rules_version='2';
+   service cloud.firestore { match /databases/{d}/documents {
+     match /users/{u}    { allow read: if request.auth!=null; allow write: if request.auth.uid==u; }
+     match /products/{p} { allow read: if request.auth!=null;
+                           allow create: if request.auth!=null && request.resource.data.ownerUid==request.auth.uid;
+                           allow update, delete: if request.auth.uid==resource.data.ownerUid; }
+     match /requests/{r} { allow create: if request.auth!=null && request.resource.data.farmerUid==request.auth.uid;
+                           allow read: if request.auth.uid==resource.data.farmerUid || request.auth.uid==resource.data.targetUid;
+                           allow update: if request.auth.uid==resource.data.targetUid; }
+   }}
+4. Authentication > Settings > Authorized domains: add your hosting domain.
+5. Deploy: firebase init hosting, then firebase deploy (or drag this folder to Netlify Drop).
+-->
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Tamil:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#EDF1EA;--card:#fff;--ink:#17261D;--mute:#5B6B60;--g:#1F5A3F;--y:#E0A526;--line:#D3DBD0;--bad:#B3392B}
+@media (prefers-color-scheme:dark){:root{--bg:#101A14;--card:#18251D;--ink:#E7EFE8;--mute:#9DB0A3;--g:#4FB27F;--y:#E8B53F;--line:#2A3A30;--bad:#E57A6B}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Noto Sans Tamil",system-ui,sans-serif}
+header{background:var(--g);color:#fff;padding:16px;display:flex;justify-content:space-between;align-items:center}
+header h1{margin:0;font-size:20px}header button{background:transparent;border:1px solid #fff8;color:#fff;border-radius:8px;padding:5px 10px;font:inherit;font-size:13px}
+main{max-width:720px;margin:0 auto;padding:14px 12px 40px}
+h2{font-size:18px;margin:18px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+.mute{color:var(--mute);font-size:13px}.tag{font-size:12px;padding:1px 8px;border-radius:99px;margin-right:4px;background:#CFE6D6;color:#14452E}.tag.seed{background:#F4E2AE;color:#5A4208}
+.st-pending{color:#9A6B00}.st-accepted{color:var(--g)}.st-declined{color:var(--bad)}
+input,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;margin:4px 0 8px}
+label{font-size:13px;color:var(--mute)}
+.btn{padding:9px 14px;border:0;border-radius:8px;background:var(--g);color:#fff;font:inherit;font-weight:600}.btn.alt{background:transparent;color:var(--bad);border:1px solid var(--bad)}.btn.sm{padding:6px 10px;font-size:13px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}.empty{text-align:center;color:var(--mute);padding:18px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:20px;background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:8px;font-size:14px}
+</style>
+</head>
+<body>
+<header><h1>🌾 உழவர் இணைப்பு</h1><button id="out" hidden onclick="auth.signOut()">Logout</button></header>
+<main id="app"><div class="empty">Loading…</div></main>
+<div id="rc"></div>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+const CFG={apiKey:"AIzaSyBd5B3j4ZrGQGfxYrWKbdlUXW4Dv3Dx5Ec",authDomain:"ugro-sync.firebaseapp.com",projectId:"ugro-sync",storageBucket:"ugro-sync.firebasestorage.app",messagingSenderId:"920248831069",appId:"1:920248831069:web:85c244d39d592cac3391b4"};
+firebase.initializeApp(CFG);
+const auth=firebase.auth(),fs=firebase.firestore(),$=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const toast=t=>{const d=document.createElement("div");d.className="toast";d.textContent=t;document.body.appendChild(d);setTimeout(()=>d.remove(),8000)};
+let U=null,P=null,products=[],assistants=[],reqs=[],unsub=[],q="",ft="all",confirmation=null,verifier=null;
+
+auth.onAuthStateChanged(async u=>{
+ unsub.forEach(f=>f());unsub=[];U=u;$("#out").hidden=!u;
+ if(!u){P=null;return loginView()}
+ const d=await fs.doc("users/"+u.uid).get();
+ if(!d.exists)return setupView();
+ P=d.data();listen();
+});
+
+function loginView(){
+ $("#app").innerHTML=`<div class="card"><h2 style="margin-top:0">உள்நுழை · Login</h2>
+ <label>Mobile number / கைபேசி எண்</label><input id="ph" inputmode="tel" maxlength="10" placeholder="98xxxxxxxx">
+ <button class="btn" id="send" onclick="sendOtp()">Send OTP</button>
+ <div id="otpbox" hidden><label>OTP</label><input id="otp" inputmode="numeric" maxlength="6"><button class="btn" onclick="verify()">Verify</button></div></div>`;
+}
+async function sendOtp(){
+ const n=$("#ph").value.trim();if(!/^\d{10}$/.test(n))return toast("10 digit number");
+ try{verifier=verifier||new firebase.auth.RecaptchaVerifier("rc",{size:"invisible"});
+ confirmation=await auth.signInWithPhoneNumber("+91"+n,verifier);$("#otpbox").hidden=false;toast("OTP sent")}
+ catch(e){console.error(e);toast("Could not send OTP: "+(e.code||e.message||e));try{verifier.clear()}catch(_){}verifier=null;$("#rc").innerHTML=""}
+}
+async function verify(){try{await confirmation.confirm($("#otp").value.trim())}catch(e){toast("Wrong OTP")}}
+
+function setupView(){
+ $("#app").innerHTML=`<div class="card"><h2 style="margin-top:0">உங்கள் விவரம் · Your profile</h2>
+ <label>You are / நீங்கள்</label><select id="role" onchange="document.querySelectorAll('.x').forEach(e=>e.hidden=e.dataset.r!==this.value)">
+ <option value="farmer">Farmer விவசாயி</option><option value="shop">Shop கடை</option><option value="assistant">Field assistant உதவியாளர்</option></select>
+ <label>Name / பெயர்</label><input id="nm"><label>Village / ஊர்</label><input id="vl">
+ <div class="x" data-r="shop" hidden><label>Shop name / கடை பெயர்</label><input id="sh"></div>
+ <div class="x" data-r="assistant" hidden><label>Skills / திறன்கள்</label><input id="sk"><label>Rate ₹/day</label><input id="rt" type="number"></div>
+ <button class="btn" onclick="saveProfile()">Save / சேமி</button></div>`;
+}
+async function saveProfile(){
+ const g=i=>($(i)?.value||"").trim(),role=$("#role").value;
+ if(!g("#nm")||!g("#vl")||(role==="shop"&&!g("#sh")))return toast("Fill all fields");
+ const p={role,name:g("#nm"),village:g("#vl"),phone:U.phoneNumber,shop:g("#sh"),skills:g("#sk"),rate:+g("#rt")||0};
+ await fs.doc("users/"+U.uid).set(p);P=p;listen();
+}
+
+function listen(){
+ unsub.push(fs.collection("products").onSnapshot(s=>{products=s.docs.map(d=>({id:d.id,...d.data()}));draw()}));
+ unsub.push(fs.collection("users").where("role","==","assistant").onSnapshot(s=>{assistants=s.docs.map(d=>({id:d.id,...d.data()}));draw()}));
+ const f=P.role==="farmer"?"farmerUid":"targetUid";
+ unsub.push(fs.collection("requests").where(f,"==",U.uid).onSnapshot(s=>{reqs=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.ts?.seconds||0)-(a.ts?.seconds||0));draw()}));
+}
+function draw(){if(!P)return;if(document.activeElement&&["INPUT","SELECT"].includes(document.activeElement.tagName)&&document.activeElement.id!=="srch")return;
+ $("#app").innerHTML=`<div class="mute">${esc(P.name)} · ${esc(P.village)} · ${esc(P.role)}</div>`+({farmer,shop,assistant}[P.role])()}
+const reqCard=(r,acts)=>`<div class="card"><div class="row"><div><b>${esc(r.title)}</b><br><span class="mute">${acts?esc(r.farmer)+" "+esc(r.phone)+"<br>":""}${esc(r.detail)}</span></div><b class="st-${r.status}">${r.status}</b></div>
+ ${acts&&r.status==="pending"?`<div style="margin-top:8px;display:flex;gap:8px"><button class="btn sm" onclick="setSt('${r.id}','accepted')">Accept</button><button class="btn alt sm" onclick="setSt('${r.id}','declined')">Decline</button></div>`:""}</div>`;
+const setSt=(id,s)=>fs.doc("requests/"+id).update({status:s});
+
+function farmer(){
+ const l=products.filter(p=>(ft==="all"||p.type===ft)&&(p.name+p.shop+p.village).toLowerCase().includes(q.toLowerCase()));
+ return `<h2>உரம் & விதை</h2><div class="grid2"><input id="srch" placeholder="Search / தேடுக" value="${esc(q)}" oninput="q=this.value;const i=this.selectionStart;draw();const e=$('#srch');e.focus();e.setSelectionRange(i,i)">
+ <select onchange="ft=this.value;draw()"><option value="all">All</option><option value="fert" ${ft=="fert"?"selected":""}>உரம்</option><option value="seed" ${ft=="seed"?"selected":""}>விதை</option></select></div>
+ ${l.map(p=>`<div class="card"><div class="row"><div><b>${esc(p.name)}</b><br><span class="tag ${p.type}">${p.type=="fert"?"உரம்":"விதை"}</span><span class="mute">${esc(p.shop)}, ${esc(p.village)}</span></div><b>₹${esc(p.price)}</b></div>
+ <div class="row" style="margin-top:8px;align-items:center"><input id="q${p.id}" type="number" min="1" value="1" style="width:80px;margin:0"><button class="btn sm" onclick="reqProduct('${p.id}')">Request / கேட்கவும்</button></div></div>`).join("")||'<div class="empty">No items</div>'}
+ <h2>கள உதவியாளர்</h2>
+ ${assistants.map(a=>`<div class="card"><div class="row"><div><b>${esc(a.name)}</b> <span class="mute">${esc(a.village)}</span><br><span class="mute">${esc(a.skills)}</span></div><b>₹${esc(a.rate)}/day</b></div>
+ <div class="grid2" style="margin-top:8px"><input id="d${a.id}" type="date" style="margin:0"><input id="t${a.id}" placeholder="வேலை / Work" style="margin:0"></div>
+ <button class="btn sm" style="margin-top:8px" onclick="reqAssistant('${a.id}')">Book / முன்பதிவு</button></div>`).join("")||'<div class="empty">No assistants yet</div>'}
+ <h2>என் கோரிக்கைகள்</h2>${reqs.map(r=>reqCard(r,false)).join("")||'<div class="empty">No requests yet</div>'}`;
+}
+function sendReq(o){return fs.collection("requests").add({...o,farmerUid:U.uid,farmer:P.name,phone:P.phone,status:"pending",ts:firebase.firestore.FieldValue.serverTimestamp()}).then(()=>toast("Sent ✔"))}
+function reqProduct(id){const p=products.find(x=>x.id===id),n=+$("#q"+id).value||1;
+ sendReq({kind:"product",targetUid:p.ownerUid,title:p.name+" × "+n,detail:"From "+p.shop})}
+function reqAssistant(id){const a=assistants.find(x=>x.id===id),d=$("#d"+id).value,t=$("#t"+id).value.trim();if(!d)return toast("Pick a date");
+ sendReq({kind:"assistant",targetUid:id,title:"Booking: "+a.name,detail:d+(t?" · "+t:"")})}
+
+function shop(){
+ const mine=products.filter(p=>p.ownerUid===U.uid);
+ return `<h2>புதிய பொருள் · Add product</h2><div class="card"><label>Product / பொருள்</label><input id="pn">
+ <div class="grid2"><div><label>Type</label><select id="pt"><option value="fert">உரம்</option><option value="seed">விதை</option></select></div><div><label>Price ₹</label><input id="pr" type="number" min="0"></div></div>
+ <button class="btn" onclick="addProduct()">Add / சேர்</button></div>
+ <h2>வந்த கோரிக்கைகள்</h2>${reqs.map(r=>reqCard(r,true)).join("")||'<div class="empty">No requests yet</div>'}
+ <h2>என் பொருட்கள்</h2>${mine.map(p=>`<div class="card row"><div><b>${esc(p.name)}</b><br><span class="mute">₹${esc(p.price)}</span></div><button class="btn alt sm" onclick="fs.doc('products/${p.id}').delete()">Delete</button></div>`).join("")||'<div class="empty">Add your first product</div>'}`;
+}
+async function addProduct(){const n=$("#pn").value.trim(),pr=+$("#pr").value;if(!n||!pr)return toast("Fill name and price");
+ await fs.collection("products").add({ownerUid:U.uid,shop:P.shop,village:P.village,phone:P.phone,type:$("#pt").value,name:n,price:pr});toast("Added ✔");$("#pn").value=""}
+
+function assistant(){return `<h2>முன்பதிவுகள் · Bookings</h2>${reqs.map(r=>reqCard(r,true)).join("")||'<div class="empty">No bookings yet</div>'}`}
+</script>
+</body>
+</html>
